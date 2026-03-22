@@ -1,0 +1,144 @@
+db"
+"""
+Network Monitor & Anomaly Detection Module
+Logs all transfers and detects suspicious activity
+"""
+
+import sqlite3
+import os
+from datetime import datetime
+
+DB_PATH = "logs/transfers.
+# Anomaly thresholds
+MAX_FILE_SIZE_MB = 10       # Flag files larger than 10MB
+SUSPICIOUS_IPS = ["10.0.0.99", "192.168.1.99", "172.16.0.1"]  # Known bad IPs
+ODD_HOURS = list(range(0, 6))  # Flag transfers between 12AM - 6AM
+
+
+def init_db():
+    """Initialize the SQLite database"""
+    os.makedirs("logs", exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS transfer_logs (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT,
+            src_ip      TEXT,
+            dst_ip      TEXT,
+            filename    TEXT,
+            file_size   INTEGER,
+            file_hash   TEXT,
+            status      TEXT,
+            flagged     INTEGER DEFAULT 0,
+            flag_reason TEXT
+        )
+    ''')
+    conn.commit()
+    conn.close()
+    print("[✔] Database initialized: logs/transfers.db")
+
+
+def log_to_db(src_ip, dst_ip, filename, file_size, file_hash, status,
+              flagged=0, flag_reason=""):
+    """Log a transfer event to the database"""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        INSERT INTO transfer_logs
+        (timestamp, src_ip, dst_ip, filename, file_size, file_hash, status, flagged, flag_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', (
+        str(datetime.now()),
+        src_ip, dst_ip,
+        os.path.basename(filename),
+        file_size, file_hash,
+        status, flagged, flag_reason
+    ))
+    conn.commit()
+    conn.close()
+
+
+def check_anomaly(file_size, src_ip):
+    """Check if a transfer is suspicious"""
+    reasons = []
+    current_hour = datetime.now().hour
+
+    # Check file size
+    size_mb = file_size / (1024 * 1024)
+    if size_mb > MAX_FILE_SIZE_MB:
+        reasons.append(f"Large file ({size_mb:.2f} MB > {MAX_FILE_SIZE_MB} MB limit)")
+
+    # Check suspicious IP
+    if src_ip in SUSPICIOUS_IPS:
+        reasons.append(f"Transfer from suspicious IP: {src_ip}")
+
+    # Check odd hours
+    if current_hour in ODD_HOURS:
+        reasons.append(f"Transfer at odd hour: {current_hour}:00")
+
+    if reasons:
+        return " | ".join(reasons)
+    return None
+
+
+def view_logs(limit=20):
+    """Display recent transfer logs from DB"""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute('''
+        SELECT timestamp, src_ip, dst_ip, filename, file_size, status, flagged, flag_reason
+        FROM transfer_logs
+        ORDER BY id DESC
+        LIMIT ?
+    ''', (limit,))
+    rows = c.fetchall()
+    conn.close()
+
+    if not rows:
+        print("\n[i] No transfer logs found.")
+        return
+
+    print(f"\n{'='*90}")
+    print(f"{'TIMESTAMP':<22} {'SRC IP':<16} {'DST IP':<16} {'FILE':<20} {'SIZE':>8}  {'STATUS':<10} {'FLAG'}")
+    print(f"{'='*90}")
+
+    for row in rows:
+        ts, src, dst, fname, fsize, status, flagged, reason = row
+        flag_marker = "⚠ " + reason if flagged else "✔"
+        size_str = f"{fsize:,} B" if fsize else "N/A"
+        print(f"{str(ts)[:21]:<22} {src:<16} {dst:<16} {fname[:19]:<20} {size_str:>8}  {status:<10} {flag_marker}")
+
+    print(f"{'='*90}\n")
+
+
+def get_stats():
+    """Get summary statistics of all transfers"""
+    init_db()
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+
+    c.execute("SELECT COUNT(*) FROM transfer_logs")
+    total = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM transfer_logs WHERE flagged=1")
+    flagged = c.fetchone()[0]
+
+    c.execute("SELECT COUNT(*) FROM transfer_logs WHERE status='SUCCESS'")
+    success = c.fetchone()[0]
+
+    c.execute("SELECT SUM(file_size) FROM transfer_logs")
+    total_bytes = c.fetchone()[0] or 0
+
+    conn.close()
+
+    print(f"\n{'='*40}")
+    print(f"  📊 TRANSFER STATISTICS")
+    print(f"{'='*40}")
+    print(f"  Total Transfers  : {total}")
+    print(f"  Successful       : {success}")
+    print(f"  Flagged (Alerts) : {flagged}")
+    print(f"  Total Data       : {total_bytes / 1024:.2f} KB")
+    print(f"{'='*40}\n")
